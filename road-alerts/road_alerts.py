@@ -229,9 +229,11 @@ class Place:
 
 def geocode(text: str) -> Place:
     t = text.strip()
-    m = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*", t)
+    # "Home=43.02,-88.17" -> named coordinates (keeps addresses out of the code)
+    m = re.fullmatch(r"\s*(?:([^=]+?)\s*=\s*)?(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*", t)
     if m:
-        return Place(f"{float(m[1]):.4f},{float(m[2]):.4f}", float(m[1]), float(m[2]))
+        name = m[1] or f"{float(m[2]):.4f},{float(m[3]):.4f}"
+        return Place(name, float(m[2]), float(m[3]))
     key = t.lower().removesuffix(", wi").removesuffix(" wi").strip()
     if key in PLACES:
         label, lat, lon = PLACES[key]
@@ -264,9 +266,11 @@ class Route:
     road_labels: list    # human-readable main roads, in order
 
 
-def get_route(a: Place, b: Place) -> Route:
-    url = (f"https://router.project-osrm.org/route/v1/driving/"
-           f"{a.lon},{a.lat};{b.lon},{b.lat}")
+def get_route(a: Place, b: Place, via: list[Place] | None = None) -> Route:
+    """Driving route a -> (via points, to force the roads you actually take) -> b."""
+    stops = [a, *(via or []), b]
+    url = ("https://router.project-osrm.org/route/v1/driving/"
+           + ";".join(f"{p.lon},{p.lat}" for p in stops))
     d = get_json(url, {"overview": "full", "geometries": "geojson", "steps": "true"})
     if d.get("code") != "Ok" or not d.get("routes"):
         raise RuntimeError(f"Routing failed: {d.get('code')}")
@@ -285,7 +289,8 @@ def get_route(a: Place, b: Place) -> Route:
                 dist_by_label[label] = dist_by_label.get(label, 0) + s["distance"]
                 if label not in labels:
                     labels.append(label)
-    main = [l for l in labels if dist_by_label[l] > 3000][:6]
+    cutoff = min(3000, r["distance"] * 0.15)
+    main = [l for l in labels if dist_by_label[l] > cutoff][:6]
     return Route(latlons, r["distance"] / 1609.34, r["duration"] / 60, roads, main)
 
 
@@ -545,11 +550,13 @@ def check_winter_roads(corr: Corridor, route: Route, rep: Report, key: str):
 
 # --------------------------------------------------------------------------
 
-def run_check(origin_text: str, dest_text: str, hours: int = 3) -> Report:
+def run_check(origin_text: str, dest_text: str, hours: int = 3,
+              via_texts: list[str] | None = None) -> Report:
     origin, dest = geocode(origin_text), geocode(dest_text)
+    via = [geocode(v) for v in (via_texts or [])]
     rep = Report(origin, dest, None)
     try:
-        route = get_route(origin, dest)
+        route = get_route(origin, dest, via)
     except RuntimeError as e:
         rep.notes.append(f"Routing failed ({e}); using a straight line between the two points.")
         route = Route([(origin.lat, origin.lon), (dest.lat, dest.lon)],
@@ -587,7 +594,8 @@ def format_full(rep: Report) -> str:
     out = [f"Trip: {rep.origin.label}  ->  {rep.dest.label}",
            f"Checked {rep.checked_at.strftime('%a %b %-d, %-I:%M %p %Z')}"]
     if r and r.minutes:
-        out.append(f"Route: {r.miles:.0f} mi, ~{r.minutes:.0f} min via {', '.join(r.road_labels) or 'local roads'}")
+        out.append(f"Route: {r.miles:.0f} mi via {', '.join(r.road_labels) or 'local roads'} "
+                   f"(routing estimate ~{r.minutes:.0f} min; usually faster)")
     out += ["", f"VERDICT: {rep.verdict} - {VERDICT_TEXT[rep.verdict]}", ""]
     important = [f for f in rep.findings if f.level != "GOOD"]
     heads_up = [f for f in rep.findings if f.level == "GOOD" and f.where == "on route"]
@@ -615,8 +623,8 @@ def format_sms(rep: Report, limit: int = 600) -> str:
     o, d = rep.origin.label.split(",")[0], rep.dest.label.split(",")[0]
     head = f"Roads {o}->{d}: {rep.verdict}."
     r = rep.route
-    if r and r.minutes:
-        head += f" {r.miles:.0f}mi ~{r.minutes:.0f}min."
+    if r and r.road_labels:
+        head += f" Via {', '.join(r.road_labels[:4])}."
     parts = [head]
     for f in _sorted([f for f in rep.findings if f.level != "GOOD"])[:4]:
         parts.append(f"- {f.short()}")
@@ -641,9 +649,12 @@ def main(argv=None):
     ap.add_argument("--sms", action="store_true", help="print a short text-message version")
     ap.add_argument("--json", action="store_true", help="print machine-readable JSON")
     ap.add_argument("--hours", type=int, default=3, help="forecast hours to consider (default 3)")
+    ap.add_argument("--via", action="append", default=[], metavar="PLACE",
+                    help="force the route through this point (repeatable, in order); "
+                         "use it to match the roads you actually drive")
     args = ap.parse_args(argv)
 
-    rep = run_check(args.origin, args.destination, args.hours)
+    rep = run_check(args.origin, args.destination, args.hours, args.via)
     if args.json:
         print(json.dumps({
             "verdict": rep.verdict, "origin": rep.origin.__dict__, "destination": rep.dest.__dict__,

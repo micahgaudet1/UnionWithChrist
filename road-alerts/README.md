@@ -9,6 +9,14 @@ python3 road_alerts.py waukesha racine --sms       # short version for a text
 python3 road_alerts.py "43.01,-88.23" "Fox Lake, WI" --json
 ```
 
+Use `--via PLACE` (repeatable) to force the route onto the roads you actually
+drive, and `Name=lat,lon` to give a point a friendly name without putting an
+address in the code:
+
+```
+python3 road_alerts.py "Home=43.03,-88.17" "Church=42.70,-87.84" --via 43.03,-88.18 --sms
+```
+
 Places can be an address, a town, `lat,lon`, or a shortcut:
 `waukesha`, `racine`, `fox lake`, `milwaukee`, `brookfield`, `oconomowoc`,
 `kenosha`, `madison`. Python 3.9+, standard library only.
