@@ -21,6 +21,15 @@ Places can be an address, a town, `lat,lon`, or a shortcut:
 `waukesha`, `racine`, `fox lake`, `milwaukee`, `brookfield`, `oconomowoc`,
 `kenosha`, `madison`. Python 3.9+, standard library only.
 
+Plan ahead with `--depart` (`07:00`, `sun 7am`, `sun 1pm`, or ISO time, Central):
+the forecast and NWS alerts are judged for that time, and alerts that end
+before you leave are ignored. Add `--only-if-bad` to print nothing on a GOOD
+day, for early-warning texts that only go out when something's wrong.
+
+```
+python3 road_alerts.py waukesha racine --depart "sun 7am" --sms --only-if-bad
+```
+
 Exit code: `0` GOOD, `1` CAUTION, `2` BAD (handy for scripts).
 
 ## What it checks

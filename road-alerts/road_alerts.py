@@ -31,7 +31,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -317,6 +317,11 @@ class Report:
     findings: list = field(default_factory=list)
     notes: list = field(default_factory=list)  # data-source problems
     checked_at: datetime = field(default_factory=lambda: datetime.now(CENTRAL))
+    depart: datetime | None = None  # planned departure (None = now)
+
+    @property
+    def start(self) -> datetime:
+        return self.depart or datetime.now(CENTRAL)
 
     @property
     def verdict(self):
@@ -349,6 +354,10 @@ def check_nws_alerts(corr: Corridor, rep: Report):
     shown = set()
     for p in seen.values():
         ev = p["event"]
+        # Planning ahead: skip alerts that will be over before you leave.
+        ends = p.get("ends")
+        if rep.depart and ends and datetime.fromisoformat(ends) < rep.depart:
+            continue
         sig = (ev, p.get("ends") or p.get("expires"))
         if sig in shown:  # same alert issued for neighbouring zones
             continue
@@ -367,7 +376,7 @@ def check_nws_alerts(corr: Corridor, rep: Report):
 
 def check_forecast(rep: Report, hours: int):
     """Hourly forecast at start and destination over the drive window."""
-    now = datetime.now(timezone.utc)
+    now = rep.start.astimezone(timezone.utc)
     for place in (rep.origin, rep.dest):
         try:
             pt = get_json(f"https://api.weather.gov/points/{place.lat:.4f},{place.lon:.4f}",
@@ -550,11 +559,41 @@ def check_winter_roads(corr: Corridor, route: Route, rep: Report, key: str):
 
 # --------------------------------------------------------------------------
 
+_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def parse_depart(text: str | None, now: datetime | None = None) -> datetime | None:
+    """'07:00', '7am', 'sun 07:00', 'sun 1pm' or ISO -> next such time (Central)."""
+    if not text:
+        return None
+    now = now or datetime.now(CENTRAL)
+    t = text.strip().lower()
+    try:
+        dt = datetime.fromisoformat(text)
+        return dt if dt.tzinfo else dt.replace(tzinfo=CENTRAL)
+    except ValueError:
+        pass
+    m = re.fullmatch(r"(?:(mon|tue|wed|thu|fri|sat|sun)\w*\s+)?(\d{1,2})(?::(\d\d))?\s*(am|pm)?", t)
+    if not m:
+        raise SystemExit(f"Can't read departure time {text!r}; try '07:00' or 'sun 1pm'.")
+    hour, minute = int(m[2]), int(m[3] or 0)
+    if m[4] == "pm" and hour < 12:
+        hour += 12
+    if m[4] == "am" and hour == 12:
+        hour = 0
+    cand = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if m[1]:
+        cand += timedelta(days=(_DAYS.index(m[1]) - now.weekday()) % 7)
+    if cand < now - timedelta(minutes=30):  # already passed -> next occurrence
+        cand += timedelta(days=7 if m[1] else 1)
+    return cand
+
+
 def run_check(origin_text: str, dest_text: str, hours: int = 3,
-              via_texts: list[str] | None = None) -> Report:
+              via_texts: list[str] | None = None, depart: datetime | None = None) -> Report:
     origin, dest = geocode(origin_text), geocode(dest_text)
     via = [geocode(v) for v in (via_texts or [])]
-    rep = Report(origin, dest, None)
+    rep = Report(origin, dest, None, depart=depart)
     try:
         route = get_route(origin, dest, via)
     except RuntimeError as e:
@@ -621,13 +660,20 @@ def format_full(rep: Report) -> str:
 def format_sms(rep: Report, limit: int = 600) -> str:
     """Compact text for a phone. Kept short; SMS gateways split long messages."""
     o, d = rep.origin.label.split(",")[0], rep.dest.label.split(",")[0]
-    head = f"Roads {o}->{d}: {rep.verdict}."
+    when = ""
+    if rep.depart and abs((rep.depart - rep.checked_at).total_seconds()) > 45 * 60:
+        when = " " + rep.depart.strftime("%a %-I:%M%p").replace(":00", "")
+    head = f"Roads {o}->{d}{when}: {rep.verdict}."
     r = rep.route
     if r and r.road_labels:
         head += f" Via {', '.join(r.road_labels[:4])}."
     parts = [head]
     for f in _sorted([f for f in rep.findings if f.level != "GOOD"])[:4]:
         parts.append(f"- {f.short()}")
+    if rep.verdict == "BAD":
+        parts.append("Tip: leave much earlier, delay, or skip this trip if you can.")
+    elif rep.verdict == "CAUTION":
+        parts.append("Tip: allow extra time and drive slower.")
     if rep.verdict == "GOOD":
         fcs = [n.replace("Forecast ", "") for n in rep.notes if n.startswith("Forecast")]
         parts.append("No weather alerts or closures on route.")
@@ -652,9 +698,16 @@ def main(argv=None):
     ap.add_argument("--via", action="append", default=[], metavar="PLACE",
                     help="force the route through this point (repeatable, in order); "
                          "use it to match the roads you actually drive")
+    ap.add_argument("--depart", metavar="WHEN",
+                    help="planned departure, e.g. '07:00', 'sun 7am', 'sun 1pm' (Central). "
+                         "Forecast and alerts are judged for that time instead of now")
+    ap.add_argument("--only-if-bad", action="store_true",
+                    help="print nothing when the verdict is GOOD (for early-warning texts)")
     args = ap.parse_args(argv)
 
-    rep = run_check(args.origin, args.destination, args.hours, args.via)
+    rep = run_check(args.origin, args.destination, args.hours, args.via, parse_depart(args.depart))
+    if args.only_if_bad and rep.verdict == "GOOD":
+        return 0
     if args.json:
         print(json.dumps({
             "verdict": rep.verdict, "origin": rep.origin.__dict__, "destination": rep.dest.__dict__,

@@ -111,5 +111,38 @@ class RoadKeyTests(unittest.TestCase):
         self.assertEqual(ra.road_keys("County Road K"), {"CTH-K"})
 
 
+class DepartTests(unittest.TestCase):
+    NOW = ra.datetime(2026, 11, 28, 19, 40, tzinfo=ra.CENTRAL)  # Saturday 7:40pm
+
+    def test_sunday_morning_from_saturday_night(self):
+        d = ra.parse_depart("sun 7am", self.NOW)
+        self.assertEqual((d.weekday(), d.hour, d.day), (6, 7, 29))
+
+    def test_plain_time_rolls_to_tomorrow(self):
+        d = ra.parse_depart("07:00", self.NOW)
+        self.assertEqual((d.day, d.hour), (29, 7))
+
+    def test_pm(self):
+        self.assertEqual(ra.parse_depart("sun 3pm", self.NOW).hour, 15)
+
+    def test_alert_ending_before_departure_skipped(self):
+        rep = ra.Report(O, D, ROUTE, depart=ra.parse_depart("sun 7am", self.NOW))
+        alert = {"features": [{"properties": {
+            "id": "x", "event": "Winter Storm Warning", "ends": "2026-11-28T22:00:00-06:00",
+            "expires": None, "description": "", "headline": "h"}}]}
+        with mock.patch.object(ra, "get_json", return_value=alert):
+            ra.check_nws_alerts(CORR, rep)
+        self.assertEqual(rep.verdict, "GOOD")
+
+    def test_alert_lasting_past_departure_counts(self):
+        rep = ra.Report(O, D, ROUTE, depart=ra.parse_depart("sun 7am", self.NOW))
+        alert = {"features": [{"properties": {
+            "id": "x", "event": "Winter Storm Warning", "ends": "2026-11-29T12:00:00-06:00",
+            "expires": None, "description": "", "headline": "h"}}]}
+        with mock.patch.object(ra, "get_json", return_value=alert):
+            ra.check_nws_alerts(CORR, rep)
+        self.assertEqual(rep.verdict, "BAD")
+
+
 if __name__ == "__main__":
     unittest.main()
