@@ -38,6 +38,7 @@ Exit code: `0` GOOD, `1` CAUTION, `2` BAD (handy for scripts).
 |---|---|---|
 | NWS `api.weather.gov` alerts | Winter Storm / Blizzard / Ice Storm warnings, advisories etc. at points every ~12 km along the route | No |
 | NWS hourly forecast | Snow, freezing rain, precip near freezing at start and destination over the next 3 h | No |
+| NWS station observations | Black ice: rain/drizzle/snow in the last 12 h + temps at or below 32°F now or at departure (freezing rain = BAD) | No |
 | 511WI WZDx feed | Work zones, lane closures, full road closures | No |
 | 511WI events | Crashes, incidents, closures | `WI511_KEY` |
 | 511WI winter roads | Partially / Completely Covered, Travel Not Advised segments | `WI511_KEY` |

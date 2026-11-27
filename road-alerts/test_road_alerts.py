@@ -111,6 +111,38 @@ class RoadKeyTests(unittest.TestCase):
         self.assertEqual(ra.road_keys("County Road K"), {"CTH-K"})
 
 
+def _obs(desc, temp_c, weather=None):
+    return {"textDescription": desc, "temperature": {"value": temp_c},
+            "presentWeather": [{"weather": w} for w in (weather or [])]}
+
+
+class BlackIceTests(unittest.TestCase):
+    def test_rain_then_freezing_is_caution(self):
+        obs = [_obs("Cloudy", -1), _obs("Light Rain", 2, ["rain"])]
+        f = ra.assess_recent_weather("Home", obs, 30)
+        self.assertEqual(f.level, "CAUTION")
+        self.assertIn("Black ice", f.title)
+
+    def test_rain_but_warm_is_fine(self):
+        obs = [_obs("Cloudy", 6), _obs("Rain", 7)]
+        self.assertIsNone(ra.assess_recent_weather("Home", obs, 40))
+
+    def test_warm_now_but_freezing_at_departure(self):
+        obs = [_obs("Cloudy", 3), _obs("Rain", 4)]
+        self.assertEqual(ra.assess_recent_weather("Home", obs, 31).level, "CAUTION")
+
+    def test_freezing_rain_is_bad(self):
+        obs = [_obs("Freezing Rain", -2, ["freezing_rain"])]
+        self.assertEqual(ra.assess_recent_weather("Home", obs, 30).level, "BAD")
+
+    def test_recent_snow_and_cold(self):
+        obs = [_obs("Cloudy", -4), _obs("Light Snow", -3, ["snow"])]
+        self.assertIn("snow", ra.assess_recent_weather("Home", obs, 25).title.lower())
+
+    def test_dry_is_fine(self):
+        self.assertIsNone(ra.assess_recent_weather("Home", [_obs("Clear", -10)], -5))
+
+
 class DepartTests(unittest.TestCase):
     NOW = ra.datetime(2026, 11, 28, 19, 40, tzinfo=ra.CENTRAL)  # Saturday 7:40pm
 

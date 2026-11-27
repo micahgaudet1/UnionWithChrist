@@ -318,6 +318,8 @@ class Report:
     notes: list = field(default_factory=list)  # data-source problems
     checked_at: datetime = field(default_factory=lambda: datetime.now(CENTRAL))
     depart: datetime | None = None  # planned departure (None = now)
+    stations: dict = field(default_factory=dict)       # place label -> NWS stations URL
+    depart_temp_f: dict = field(default_factory=dict)  # place label -> forecast temp at departure
 
     @property
     def start(self) -> datetime:
@@ -386,8 +388,13 @@ def check_forecast(rep: Report, hours: int):
         except (RuntimeError, KeyError) as e:
             rep.notes.append(f"NWS forecast for {place.label}: {e}")
             continue
+        rep.stations[place.label] = pt["properties"].get("observationStations")
         periods = [p for p in fc["properties"]["periods"]
                    if datetime.fromisoformat(p["endTime"]) > now][:hours]
+        if periods:
+            p0 = periods[0]
+            rep.depart_temp_f[place.label] = (p0["temperature"] if p0.get("temperatureUnit") == "F"
+                                              else p0["temperature"] * 9 / 5 + 32)
         worst = None
         for p in periods:
             temp = p["temperature"] if p.get("temperatureUnit") == "F" else p["temperature"] * 9 / 5 + 32
@@ -417,6 +424,70 @@ def check_forecast(rep: Report, hours: int):
         elif periods:
             p = periods[0]
             rep.notes.append(f"Forecast {place.label.split(',')[0]}: {p['shortForecast']}, {p['temperature']}°F")
+
+
+_WET = ("rain", "drizzle", "snow", "sleet", "ice pellets", "freezing", "showers", "thunderstorm", "hail")
+
+
+def assess_recent_weather(label: str, obs: list, depart_temp_f: float | None):
+    """Black-ice logic from the last ~12 h of station observations.
+
+    obs: list of NWS observation 'properties' dicts, newest first.
+    Returns a Finding or None.
+    """
+    if not obs:
+        return None
+    seen = set()
+    for o in obs:
+        words = [(o.get("textDescription") or "").lower()]
+        words += [(w.get("weather") or "").replace("_", " ").lower() for w in (o.get("presentWeather") or [])]
+        txt = " ".join(words)
+        if "freezing rain" in txt or "freezing drizzle" in txt:
+            seen.add("freezing rain")
+        elif "snow" in txt or "sleet" in txt or "ice pellets" in txt:
+            seen.add("snow")
+        elif any(w in txt for w in _WET):
+            seen.add("rain")
+    if not seen:
+        return None
+    temps_c = [o["temperature"]["value"] for o in obs
+               if isinstance(o.get("temperature"), dict) and o["temperature"].get("value") is not None]
+    now_f = temps_c[0] * 9 / 5 + 32 if temps_c else None
+    cold_f = min(t for t in (now_f, depart_temp_f) if t is not None) if (now_f is not None or depart_temp_f is not None) else None
+    town = label.split(",")[0]
+    temp_txt = f"{cold_f:.0f}°F" if cold_f is not None else "temp unknown"
+    if "freezing rain" in seen:
+        return Finding("BAD", "Observed", f"Freezing rain fell near {town} - ice likely",
+                       f"Freezing rain reported in the last 12 h; {temp_txt}.", "recent")
+    if cold_f is None or cold_f > 32:
+        return None
+    if "snow" in seen:
+        return Finding("CAUTION", "Observed", f"Recent snow near {town} - slick spots ({temp_txt})",
+                       "Snow/sleet reported in the last 12 h and temps at or below freezing; "
+                       "side roads may not be plowed yet.", "recent")
+    return Finding("CAUTION", "Observed", f"Black ice risk near {town} ({temp_txt})",
+                   "Rain fell in the last 12 h and temps are at or below freezing now or at "
+                   "departure - wet pavement can refreeze.", "recent")
+
+
+def check_recent_weather(rep: Report, lookback_h: int = 12):
+    since = (datetime.now(timezone.utc) - timedelta(hours=lookback_h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for place in (rep.origin, rep.dest):
+        url = rep.stations.get(place.label)
+        if not url:
+            continue
+        try:
+            st = get_json(url, headers={"Accept": "application/geo+json"})
+            sid = st["features"][0]["properties"]["stationIdentifier"]
+            d = get_json(f"https://api.weather.gov/stations/{sid}/observations",
+                         {"start": since}, {"Accept": "application/geo+json"})
+            obs = [f["properties"] for f in d.get("features", [])]
+        except (RuntimeError, KeyError, IndexError) as e:
+            rep.notes.append(f"Recent weather near {place.label}: {e}")
+            continue
+        f = assess_recent_weather(place.label, obs, rep.depart_temp_f.get(place.label))
+        if f:
+            rep.findings.append(f)
 
 
 def _road_match(event_roads: set, route_roads: set):
@@ -607,6 +678,7 @@ def run_check(origin_text: str, dest_text: str, hours: int = 3,
 
     check_nws_alerts(corr, rep)
     check_forecast(rep, hours)
+    check_recent_weather(rep)
     check_wzdx(corr, route, rep)
     key = _wi511_key()
     if key:
