@@ -403,6 +403,8 @@ def check_forecast(rep: Report, hours: int):
                 lvl, why = "CAUTION", "precip near freezing - icy spots likely"
             elif "snow" in sf or "flurr" in sf:
                 lvl, why = "CAUTION", "light snow"
+            elif precip and pop >= 40:
+                lvl, why = "CAUTION", "rain likely - wet roads"
             elif "fog" in sf:
                 lvl, why = "CAUTION", "fog"
             if lvl and (worst is None or LEVELS[lvl] > LEVELS[worst[0]]):
